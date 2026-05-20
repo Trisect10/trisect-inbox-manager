@@ -1,0 +1,260 @@
+/**
+ * rules.js — Project rule engine for Trisect Inbox Manager
+ * Handles storage, matching, and application of project filing rules.
+ */
+
+const RULES_KEY = "trisect_project_rules";
+const SNOOZE_KEY = "trisect_snoozed_emails";
+
+// ─────────────────────────────────────────────
+// RULE STORAGE (Office Roaming Settings)
+// ─────────────────────────────────────────────
+
+function getRules() {
+  const settings = Office.context.roamingSettings;
+  return settings.get(RULES_KEY) || [];
+}
+
+function saveRules(rules) {
+  return new Promise((resolve, reject) => {
+    const settings = Office.context.roamingSettings;
+    settings.set(RULES_KEY, rules);
+    settings.saveAsync((result) => {
+      if (result.status === Office.AsyncResultStatus.Succeeded) resolve();
+      else reject(result.error);
+    });
+  });
+}
+
+async function addRule(rule) {
+  // rule: { id, name, keywords: [], senders: [], folderName, enabled }
+  const rules = getRules();
+  rule.id = rule.id || Date.now().toString();
+  rule.enabled = rule.enabled !== false;
+  rules.push(rule);
+  await saveRules(rules);
+  return rule;
+}
+
+async function updateRule(id, updates) {
+  const rules = getRules().map(r => r.id === id ? { ...r, ...updates } : r);
+  await saveRules(rules);
+}
+
+async function deleteRule(id) {
+  const rules = getRules().filter(r => r.id !== id);
+  await saveRules(rules);
+}
+
+// ─────────────────────────────────────────────
+// MATCHING LOGIC
+// ─────────────────────────────────────────────
+
+/**
+ * Find the best matching rule for an email item.
+ * Priority: keyword match in subject > sender domain/address match
+ */
+function findMatchingRule(item) {
+  const rules = getRules().filter(r => r.enabled);
+  const subject = (item.subject || "").toLowerCase();
+  const senderEmail = (item.from?.emailAddress || "").toLowerCase();
+  const senderName = (item.from?.displayName || "").toLowerCase();
+
+  for (const rule of rules) {
+    // Check keywords against subject line
+    const keywordMatch = (rule.keywords || []).some(kw =>
+      subject.includes(kw.toLowerCase())
+    );
+    if (keywordMatch) return rule;
+
+    // Check sender email or display name
+    const senderMatch = (rule.senders || []).some(s =>
+      senderEmail.includes(s.toLowerCase()) || senderName.includes(s.toLowerCase())
+    );
+    if (senderMatch) return rule;
+  }
+
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// AUTO-FILE: Check read + unflagged, then move
+// ─────────────────────────────────────────────
+
+/**
+ * Evaluate the current item and auto-file if conditions are met.
+ * Called on item open and on property changes.
+ */
+function evaluateAndAutoFile(item, callback) {
+  // Must be read
+  if (item.isRead === false) {
+    callback && callback({ filed: false, reason: "unread" });
+    return;
+  }
+
+  // Must not be flagged for follow-up
+  item.getAsync
+    ? checkFlagAndFile(item, callback)
+    : legacyCheckFlagAndFile(item, callback);
+}
+
+function checkFlagAndFile(item, callback) {
+  // Office.js 1.8+ supports flag check via categories/sensitivity workaround
+  // We use the followUpFlag property if available
+  try {
+    const flag = item.followUpFlag;
+    if (flag && flag.flagStatus === "flagged") {
+      callback && callback({ filed: false, reason: "flagged" });
+      return;
+    }
+  } catch (e) {
+    // followUpFlag not supported in this version; proceed anyway
+  }
+
+  const rule = findMatchingRule(item);
+  if (!rule) {
+    callback && callback({ filed: false, reason: "no_rule_match" });
+    return;
+  }
+
+  moveToFolder(item, rule.folderName, (result) => {
+    callback && callback({ filed: result.success, rule, ...result });
+  });
+}
+
+function legacyCheckFlagAndFile(item, callback) {
+  const rule = findMatchingRule(item);
+  if (!rule) {
+    callback && callback({ filed: false, reason: "no_rule_match" });
+    return;
+  }
+  moveToFolder(item, rule.folderName, (result) => {
+    callback && callback({ filed: result.success, rule, ...result });
+  });
+}
+
+// ─────────────────────────────────────────────
+// FOLDER OPERATIONS
+// ─────────────────────────────────────────────
+
+/**
+ * Move the current item to a named folder.
+ * If the folder doesn't exist and createIfMissing is true, create it first.
+ */
+function moveToFolder(item, folderName, callback, createIfMissing = true) {
+  // Office.js MoveToFolder is available in requirement set 1.8
+  if (Office.context.mailbox.item && item.move) {
+    findOrCreateFolder(folderName, createIfMissing, (folderId) => {
+      if (!folderId) {
+        callback({ success: false, error: "Folder not found: " + folderName });
+        return;
+      }
+      item.move(folderId, (result) => {
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+          callback({ success: true, folderName });
+        } else {
+          callback({ success: false, error: result.error.message });
+        }
+      });
+    });
+  } else {
+    // Fallback: notify user to move manually
+    callback({ success: false, error: "Move API not supported in this Outlook version." });
+  }
+}
+
+/**
+ * Search existing folders for folderName, optionally creating it.
+ * Returns folder ID via callback.
+ */
+function findOrCreateFolder(folderName, createIfMissing, callback) {
+  Office.context.mailbox.getFoldersAsync({ rootFolderType: "inbox" }, (result) => {
+    if (result.status !== Office.AsyncResultStatus.Succeeded) {
+      // Try getAllFolders as fallback
+      Office.context.mailbox.getAllFoldersAsync((r2) => {
+        if (r2.status !== Office.AsyncResultStatus.Succeeded) {
+          callback(null);
+          return;
+        }
+        const folder = r2.value.find(f => f.displayName.toLowerCase() === folderName.toLowerCase());
+        if (folder) {
+          callback(folder.folderId);
+        } else if (createIfMissing) {
+          createFolder(folderName, callback);
+        } else {
+          callback(null);
+        }
+      });
+      return;
+    }
+
+    const folder = result.value.find(f => f.displayName.toLowerCase() === folderName.toLowerCase());
+    if (folder) {
+      callback(folder.folderId);
+    } else if (createIfMissing) {
+      createFolder(folderName, callback);
+    } else {
+      callback(null);
+    }
+  });
+}
+
+function createFolder(folderName, callback) {
+  // createFolderAsync available in Mailbox 1.8+
+  if (Office.context.mailbox.createFolderAsync) {
+    Office.context.mailbox.createFolderAsync(folderName, (result) => {
+      if (result.status === Office.AsyncResultStatus.Succeeded) {
+        callback(result.value.folderId);
+      } else {
+        callback(null);
+      }
+    });
+  } else {
+    callback(null);
+  }
+}
+
+// ─────────────────────────────────────────────
+// SNOOZE
+// ─────────────────────────────────────────────
+
+function getSnoozed() {
+  const settings = Office.context.roamingSettings;
+  return settings.get(SNOOZE_KEY) || [];
+}
+
+async function snoozeItem(item, untilDate) {
+  const snoozed = getSnoozed();
+  snoozed.push({
+    itemId: item.itemId,
+    subject: item.subject,
+    snoozeUntil: untilDate.toISOString(),
+  });
+  const settings = Office.context.roamingSettings;
+  settings.set(SNOOZE_KEY, snoozed);
+  return new Promise((resolve, reject) => {
+    settings.saveAsync(r => r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error));
+  });
+}
+
+function getDueSnoozed() {
+  const now = new Date();
+  return getSnoozed().filter(s => new Date(s.snoozeUntil) <= now);
+}
+
+// ─────────────────────────────────────────────
+// EXPORTS (available globally via script tag)
+// ─────────────────────────────────────────────
+
+window.TrisectRules = {
+  getRules,
+  addRule,
+  updateRule,
+  deleteRule,
+  findMatchingRule,
+  evaluateAndAutoFile,
+  moveToFolder,
+  findOrCreateFolder,
+  snoozeItem,
+  getDueSnoozed,
+};

@@ -1,0 +1,153 @@
+# Trisect Inbox Manager — Outlook Add-In
+
+An Outlook task pane add-in for Trisect Commercial that auto-files emails by project, snoozes messages, and bulk-deletes unwanted senders.
+
+---
+
+## Features
+
+| Feature | How it works |
+|---|---|
+| **Auto-File** | When toggled ON, any email that is *read* and *not flagged for follow-up* is automatically moved to its matching project folder when you open it |
+| **File Now** | One-click button in the reading pane and task pane to immediately move the current email |
+| **Project Rules** | Match by subject keywords (e.g. job numbers) and/or sender email/domain. Rules stored in Office Roaming Settings — sync across devices |
+| **Create Folders** | If the target folder doesn't exist, the add-in creates it automatically |
+| **Snooze** | Snooze an email for 2 hrs, tomorrow, 2 days, 1 week, or a custom date/time |
+| **Bulk Clean** | Scan inbox for senders with 3+ emails, then delete all emails from a sender in one click |
+
+---
+
+## Setup
+
+### 1. Host the files
+
+You need an HTTPS host for the add-in files. Options:
+
+- **GitHub Pages** (free) — push this folder to a repo and enable Pages
+- **Azure Static Web Apps** (free tier) — drag-and-drop deploy
+- **Any web server with HTTPS**
+
+Upload all files maintaining this structure:
+```
+/
+├── manifest.xml
+├── taskpane.html
+├── commands.html
+├── src/
+│   └── rules.js
+└── assets/
+    ├── icon-16.png
+    ├── icon-32.png
+    └── icon-80.png
+```
+
+### 2. Update manifest.xml
+
+Replace every instance of `https://YOUR-HOSTING-URL` with your actual hosted URL.
+
+Example — if hosted at `https://trisect.github.io/inbox-manager`:
+```xml
+<SourceLocation DefaultValue="https://trisect.github.io/inbox-manager/taskpane.html" />
+```
+
+### 3. Add icons
+
+Create or download simple PNG icons in 3 sizes and place in `/assets/`:
+- `icon-16.png` (16×16)
+- `icon-32.png` (32×32)  
+- `icon-80.png` (80×80)
+
+A simple folder or envelope icon works well.
+
+### 4. Sideload the add-in
+
+**Outlook Desktop (Windows):**
+1. Open Outlook
+2. File → Manage Add-ins (opens browser)
+3. Click the ➕ dropdown → Add from file
+4. Select `manifest.xml`
+5. The "Trisect" group will appear in the ribbon when reading emails
+
+**Outlook Desktop (Mac):**
+1. Open Outlook
+2. Tools → Add-ins
+3. Click the ➕ → Add from file
+4. Select `manifest.xml`
+
+**Outlook Web (OWA):**
+1. Open OWA → Settings gear → View all Outlook settings
+2. Mail → Customize actions → Manage add-ins
+3. Add from file → `manifest.xml`
+
+---
+
+## Using the Add-In
+
+### Setting up your first rule
+
+1. Open any email → click **Inbox Manager** in the Trisect ribbon group
+2. Go to the **Rules** tab
+3. Click **+ Add Rule**
+4. Fill in:
+   - **Rule Name**: e.g. `Job 2045 – Elm Street`
+   - **Target Folder**: e.g. `Projects/Job 2045` (will be created if missing)
+   - **Subject Keywords**: e.g. `2045, Elm Street, ABC Roofing` (comma-separated)
+   - **Sender Email / Domain**: e.g. `@abcroofing.com` (optional, comma-separated)
+5. Save — rule is active immediately
+
+### Auto-file
+
+Toggle **Auto-File** on in the File tab. From that point on, whenever you open an email that is:
+- Already **read** (or you mark it read), AND
+- **Not flagged** for follow-up
+
+...the add-in checks for a matching rule and moves it automatically. A status bar message confirms the action.
+
+### Snooze
+
+Click **Snooze** in the task pane or the ribbon. The email item ID and snooze date are saved. On the snooze date, a notification badge appears on the message (note: full re-surfacing requires Outlook's native snooze feature or a background service — this add-in records the snooze for your reference).
+
+### Bulk Clean
+
+1. Go to the **Bulk Clean** tab
+2. Click **Scan Inbox**
+3. Any sender with 3+ emails in your inbox appears
+4. Click **Delete All** next to a sender to move all their emails to Deleted Items
+
+---
+
+## Requirements
+
+- Outlook 2019, Microsoft 365, or Outlook Web
+- Mailbox requirement set 1.8+
+- ReadWriteMailbox permissions (requested in manifest)
+
+---
+
+## File Structure
+
+```
+manifest.xml      — Add-in definition, ribbon buttons, permissions
+taskpane.html     — Full task pane UI (File, Rules, Bulk Clean tabs)
+commands.html     — Background command file (ribbon button actions)
+src/rules.js      — Rule engine: storage, matching, folder ops, snooze
+assets/           — Icons
+```
+
+---
+
+## Customization
+
+**Change auto-file behavior** — Edit `evaluateAndAutoFile()` in `rules.js` to adjust the read/flag conditions.
+
+**Add more snooze durations** — Add `<div class="snooze-opt" data-hours="N">Label</div>` in `taskpane.html`.
+
+**Change rule matching priority** — Edit `findMatchingRule()` in `rules.js`.
+
+---
+
+## Notes
+
+- Rules are stored in **Office Roaming Settings**, which sync across all your Outlook installations tied to the same account.
+- The `move` API requires **Mailbox 1.8+**. On older Outlook versions, a notification will appear instead asking you to move manually.
+- EWS (used for Bulk Clean) may require your Exchange admin to allow add-in EWS access if blocked by policy.
